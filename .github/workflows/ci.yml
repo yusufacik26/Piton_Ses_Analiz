@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Kodu cek
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Python kur
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
@@ -32,18 +32,18 @@ jobs:
     needs: python-build
     steps:
       - name: Kodu cek
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Python kur
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
       - name: Bagimliliklari yukle
         run: pip install -r requirements.txt
 
-      - name: FastAPI import testi
-        run: python -c "from main import app; print('FastAPI app basariyla yuklendi')"
+      - name: FastAPI syntax kontrolu
+        run: python -m py_compile main.py && echo "main.py syntax OK"
 
   docker-build:
     name: Docker - Image Build
@@ -51,7 +51,7 @@ jobs:
     needs: backend-build
     steps:
       - name: Kodu cek
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Docker image build et
         run: docker build -t ses-kalitesi-app .

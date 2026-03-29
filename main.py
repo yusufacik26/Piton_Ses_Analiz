@@ -4,13 +4,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import psycopg2
-import io
 from datetime import datetime
 import time
+from contextlib import asynccontextmanager
 
 from noice import clean_audio
 
-app = FastAPI()
+# Global değişkenler
+conn = None
+cur = None
 
 def get_connection():
     while True:
@@ -28,8 +30,15 @@ def get_connection():
             print("⏳ Veritabanı hazır değil, 2 saniye bekleniyor...")
             time.sleep(2)
 
-conn = get_connection()
-cur = conn.cursor()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global conn, cur
+    conn = get_connection()  
+    cur = conn.cursor()
+    yield
+
+app = FastAPI(lifespan=lifespan)  
 
 app.add_middleware(
     CORSMiddleware,
