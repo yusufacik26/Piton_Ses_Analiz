@@ -1,0 +1,90 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+
+  # ── 1. Python Sinyal İşleme Modülü ──────────────────────
+  python-build:
+    name: Python - Sinyal İşleme Testi
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v3
+
+      - name: Python kur
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Bağımlılıkları yükle
+        run: pip install -r requirements.txt
+
+      - name: noice.py import testi
+        run: python -c "import noice; print('noice.py başarıyla yüklendi')"
+
+  # ── 2. Backend (FastAPI) ─────────────────────────────────
+  backend-build:
+    name: Backend - FastAPI Build
+    runs-on: ubuntu-latest
+    needs: python-build
+
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v3
+
+      - name: Python kur
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Bağımlılıkları yükle
+        run: pip install -r requirements.txt
+
+      - name: FastAPI import testi
+        run: python -c "from main import app; print('FastAPI app başarıyla yüklendi')"
+
+  # ── 3. Docker Build ──────────────────────────────────────
+  docker-build:
+    name: Docker - Image Build
+    runs-on: ubuntu-latest
+    needs: backend-build
+
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v3
+
+      - name: Docker image build et
+        run: docker build -t ses-kalitesi-app .
+```
+
+---
+
+### `requirements.txt` dosyan yoksa oluştur:
+```
+fastapi
+uvicorn
+psycopg2-binary
+librosa
+noisereduce
+soundfile
+scipy
+numpy
+```
+
+---
+
+### Nasıl Çalışır?
+```
+GitHub'a push yaptığında otomatik tetiklenir
+           ↓
+1. python-build   → noice.py çalışıyor mu?
+           ↓
+2. backend-build  → FastAPI app yüklenebiliyor mu?
+           ↓
+3. docker-build   → Docker image build edilebiliyor mu?
