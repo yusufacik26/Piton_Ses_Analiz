@@ -1,11 +1,36 @@
-from fastapi import FastAPI, UploadFile,File
+from fastapi import FastAPI, UploadFile, File
 import os
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+import psycopg2
+import io
+from datetime import datetime
+import time
 
+from noice import clean_audio
 
 app = FastAPI()
+
+def get_connection():
+    while True:
+        try:
+            conn = psycopg2.connect(
+                dbname=os.getenv("DB_NAME"),
+                user=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASSWORD"),
+                host=os.getenv("DB_HOST"),
+                port="5432"
+            )
+            print("✅ Veritabanına bağlandı!")
+            return conn
+        except psycopg2.OperationalError:
+            print("⏳ Veritabanı hazır değil, 2 saniye bekleniyor...")
+            time.sleep(2)
+
+conn = get_connection()
+cur = conn.cursor()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,49 +46,117 @@ UPLOAD_FOLDER = "uploads"
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-#ana sayfa
+# Ana sayfa
 @app.get("/")
 async def root():
     return FileResponse("static/arayüz.html", media_type="text/html")
 
-#yükleme endpointi
+#------------------------------------------------------------
+# Kayıt yükleme endpointi
 @app.post("/upload/")
-async def upload_audio(file: UploadFile = File(...)):
-    file_location = os.path.join(UPLOAD_FOLDER, file.filename)
-   
-    with open(file_location, "wb") as f:
-        content = await file.read()
-        f.write(content)
+async def upload(file: UploadFile = File(...)):
+
         
-        return {"filename": file.filename, "message": "Dosya Yükleme Başarılı!"}
+    content = await file.read()
+    filename = file.filename
+
+    filepath = f"uploads/{file.filename}"
     
+    with open(filepath, "wb") as f:
+        f.write(content)
+   
+   
+    # DB'ye kaydet 
+    cur.execute(
+        "INSERT INTO audio_files (filename, data) VALUES (%s, %s) RETURNING id",
+        (filename, psycopg2.Binary(content))
+    )
+    file_id = cur.fetchone()[0]
+
+    # metadata kaydet
+    cur.execute(
+        "INSERT INTO audio_metadata (file_id, device_id, duration, created_at) VALUES (%s, %s, %s, %s)",
+        (file_id, "device_1", 0.0, datetime.now())
+    )
+    conn.commit()
+
+    clean_filename = f"clean_{file.filename}"  # zaten .wav geliyor
+    clean_path = f"uploads/{clean_filename}"
+    
+    try:
+        clean_audio(filepath, clean_path)
+
+        # Temizlenmiş veriyi de DB'ye kaydet
+        with open(clean_path, "rb") as f:
+            clean_content = f.read()
+
+        cur.execute(
+            "INSERT INTO audio_files (filename, data) VALUES (%s, %s) RETURNING id",
+            (clean_filename, psycopg2.Binary(clean_content))
+        )
+        clean_file_id = cur.fetchone()[0]
+
+        # Temizlenmiş dosya için metadata
+        cur.execute(
+            "INSERT INTO audio_metadata (file_id, device_id, duration, created_at) VALUES (%s, %s, %s, %s)",
+            (clean_file_id, "device_1", 0.0, datetime.now())
+        )
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
         
-@app.get("/recordings") #kayıtları listeleme endpointi
+    return {"message": "uploaded and cleaned"}
+
+
+#------------------------------------------------------------
+# Kayıtları listeleme endpointi (Ham ve temiz dosyaları birlikte döndürür)
+@app.get("/recordings")
 async def list_recordings():
-    files = os.listdir(UPLOAD_FOLDER)  #uploads klasöründeki dosyaları listele
+    files = os.listdir(UPLOAD_FOLDER)
+    raw_files = [f for f in files if not f.startswith("clean_") and f.endswith(".wav")]
+
     recordings = []
-    for file in files:
+    for file in raw_files:
+        clean_filename = f"clean_{file}"
         recordings.append({
             "filename": file,
-            "url": f"/audios/{file}"
+            "raw_url": f"/audios/{file}",
+            "clean_url": f"/audios/{clean_filename}"
         })
+
     return JSONResponse(content=recordings)
 
-
-@app.get("/audios/{filename}") #kayıtları indirme endpointi
-async def get_audio(filename:str):
+#------------------------------------------------------------
+# Kayıtları getirme endpointi 
+@app.get("/audios/{filename}") 
+async def get_audio(filename: str):
     file_path = os.path.join(UPLOAD_FOLDER, filename)
+    
     if os.path.exists(file_path):
-        return FileResponse(file_path, media_type="audio/webm")
+        # Dosya türüne göre media type belirle
+        media_type = "audio/wav" if filename.endswith(".wav") else "audio/webm"
+        return FileResponse(file_path, media_type=media_type)
     else:
         return JSONResponse(content={"error": "Dosya bulunamadı"}, status_code=404)
 
+#------------------------------------------------------------
+# Kayıtları silme endpointi 
+@app.delete("/delete/{filename}") 
+async def delete_audio(filename: str):
+    raw_path = os.path.join(UPLOAD_FOLDER, filename)
+    clean_path = os.path.join(UPLOAD_FOLDER, f"clean_{filename.replace('.webm', '.wav')}")
+    
+    deleted = False
+    if os.path.exists(raw_path):
+        os.remove(raw_path)
+        deleted = True
+    if os.path.exists(clean_path):
+        os.remove(clean_path)
+        
 
-@app.delete("/delete/{filename}") #kayıtları silme endpointi
-async def delete_audio(filename:str):
-    file_location =os.path.join(UPLOAD_FOLDER, filename)
-    if os.path.exists(file_location):
-        os.remove(file_location)
-        return JSONResponse(content={"message": "Dosya silindi"})
+    if deleted:
+        return JSONResponse(content={"message": "Dosyalar silindi"})
     else:
         return JSONResponse(content={"error": "Dosya bulunamadı"}, status_code=404)

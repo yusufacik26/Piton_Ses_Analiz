@@ -17,52 +17,106 @@
 
 <br><br>
 
+<h3>🎧 Önizleme (Ham)</h3>
 <audio id="audioPlayback" controls></audio>
 
 <script>
-let mediaRecorder;
-let audioChunks = [];
+let audioContext;
+let mediaStream;
+let scriptProcessor;
+let pcmChunks = [];
+let sampleRate = 16000;
 let audioBlob = null;
 
+// Float32 → 16bit PCM
+function floatTo16BitPCM(float32Array) {
+    const buffer = new ArrayBuffer(float32Array.length * 2);
+    const view = new DataView(buffer);
+    for (let i = 0; i < float32Array.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+    return buffer;
+}
 
+// WAV header oluştur
+function encodeWAV(samples, sampleRate) {
+    const buffer = new ArrayBuffer(44 + samples.byteLength);
+    const view = new DataView(buffer);
 
+    function writeString(offset, string) {
+        for (let i = 0; i < string.length; i++)
+            view.setUint8(offset + i, string.charCodeAt(i));
+    }
 
-// 🎤 Kayıt başlat
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + samples.byteLength, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);          // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, 'data');
+    view.setUint32(40, samples.byteLength, true);
+
+    new Uint8Array(buffer).set(new Uint8Array(samples), 44);
+    return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// Kayıt başlat
 async function startRecording() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        
-        mediaRecorder = new MediaRecorder(stream);
-        audioChunks = [];
+        pcmChunks = [];
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new AudioContext({ sampleRate });
 
-        mediaRecorder.ondataavailable = event => {
-            audioChunks.push(event.data);
+        const source = audioContext.createMediaStreamSource(mediaStream);
+        scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        scriptProcessor.onaudioprocess = (e) => {
+            const input = e.inputBuffer.getChannelData(0);
+            pcmChunks.push(floatTo16BitPCM(input));
         };
 
-        mediaRecorder.onstop = () => {
-            audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        source.connect(scriptProcessor);
+        scriptProcessor.connect(audioContext.destination);
 
-            const audioUrl = URL.createObjectURL(audioBlob);
-            document.getElementById("audioPlayback").src = audioUrl;
-
-            console.log("Kayıt hazır");
-        };
-
-        mediaRecorder.start();
+        alert("🔴 Kayıt başladı!");
     } catch (err) {
-        console.error("Mikrofon erişim hatası:", err);
-        alert("Mikrofon erişimine izin vermeniz gerekiyor!");
+        alert("Mikrofon izni gerekli!");
     }
 }
 
-// ⏹️ Kayıt bitir
+// Kayıt bitir
 function stopRecording() {
-    if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        mediaRecorder.stop();
+    if (!scriptProcessor) return;
+
+    scriptProcessor.disconnect();
+    audioContext.close();
+    mediaStream.getTracks().forEach(t => t.stop());
+
+    // Tüm PCM chunk'ları birleştir
+    const totalLength = pcmChunks.reduce((acc, b) => acc + b.byteLength, 0);
+    const combined = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of pcmChunks) {
+        combined.set(new Uint8Array(chunk), offset);
+        offset += chunk.byteLength;
     }
+
+    // WAV blob oluştur
+    audioBlob = encodeWAV(combined.buffer, sampleRate);
+    const audioUrl = URL.createObjectURL(audioBlob);
+    document.getElementById("audioPlayback").src = audioUrl;
+
+    alert("⏹️ Kayıt bitti!");
 }
 
-// 📤 API'ye gönder
+// Gönder
 async function uploadAudio() {
     if (!audioBlob) {
         alert("Önce kayıt yap!");
@@ -70,101 +124,63 @@ async function uploadAudio() {
     }
 
     const formData = new FormData();
-    
-    // Her kaydın benzersiz olması için zaman damgası ekliyoruz
-    const uniqueFilename = "kayit_" + Date.now() + ".webm"; 
+    const uniqueFilename = "kayit_" + Date.now() + ".wav"; // Direkt WAV!
     formData.append("file", audioBlob, uniqueFilename);
 
     try {
-        // FastAPI tarafındaki endpoint ile birebir eşleşmesi için sonuna / ekledik
         const response = await fetch("/upload/", {
             method: "POST",
             body: formData
         });
 
-        const result = await response.json();
-        console.log(result);
+        await response.json();
+        alert("✅ Yüklendi ve işlendi!");
 
-        alert("✅ Yüklendi!");
-
-        // Yükleme sonrası önizleme oynatıcısını sıfırla (opsiyonel ama iyi bir deneyim sunar)
         document.getElementById("audioPlayback").removeAttribute("src");
-        audioBlob = null; 
+        audioBlob = null;
 
-        // 🔥 YENİ: kayıtları yeniden yükle
         await loadRecordings();
-
     } catch (error) {
-        console.error(error);
         alert("❌ Hata oluştu");
     }
 }
 
-// 🗑️ KAYIT SİL
+// Sil
 async function deleteAudio(filename) {
-    // Kullanıcıdan onay isteyelim ki yanlışlıkla silinmesin
-    const userConfirmed = confirm(`"${filename}" dosyasını silmek istediğinize emin misiniz?`);
-    
-    if (!userConfirmed) {
-        return; // Kullanıcı iptal ederse işlemi durdur
-    }
-
-    try {
-        const response = await fetch(`/delete/${filename}`, {
-            method: "DELETE" // HTTP DELETE metodunu kullanıyoruz
-        });
-
-        if (response.ok) {
-            const result = await response.json();
-            alert("✅ " + result.message);
-            
-            // Silme işleminden sonra listeyi yenile
-            await loadRecordings();
-        } else {
-            alert("❌ Dosya silinirken bir hata oluştu.");
-        }
-
-    } catch (error) {
-        console.error("Silme hatası:", error);
-        alert("❌ Sunucuya bağlanırken hata oluştu.");
-    }
+    if (!confirm(`${filename} silinsin mi?`)) return;
+    await fetch(`/delete/${filename}`, { method: "DELETE" });
+    await loadRecordings();
 }
 
-
-// 📂 KAYITLARI ÇEK
+// Listele
 async function loadRecordings() {
-    try {
-        const response = await fetch("/recordings");
-        const data = await response.json();
+    const response = await fetch("/recordings");
+    const data = await response.json();
 
-        const listDiv = document.getElementById("recordingsList");
-        listDiv.innerHTML = "";
+    const listDiv = document.getElementById("recordingsList");
+    listDiv.innerHTML = "";
 
-        if (data.length === 0) {
-            listDiv.innerHTML = "<p>Henüz kayıt yok</p>";
-            return;
-        }
-
-        // BURADAKİ KARIŞIKLIK DÜZELTİLDİ: Sadece tek bir döngü olmalı
-        data.forEach(rec => {
-            const div = document.createElement("div");
-
-            div.innerHTML = `
-                <p><b>${rec.filename}</b></p>
-                <audio controls src="${rec.url}"></audio>
-                <button onclick="deleteAudio('${rec.filename}')" style="margin-left: 10px; color: red;">🗑️ Sil</button>
-                <hr>
-            `;
-
-            listDiv.appendChild(div);
-        });
-
-    } catch (error) {
-        console.error("Kayıtlar yüklenirken hata oluştu:", error);
+    if (data.length === 0) {
+        listDiv.innerHTML = "<p>Henüz kayıt yok</p>";
+        return;
     }
+
+    data.forEach(rec => {
+        const div = document.createElement("div");
+        div.innerHTML = `
+            <p><b>${rec.filename}</b></p>
+            <p>🔊 Ham Kayıt</p>
+            <audio controls src="${rec.raw_url}"></audio>
+            <p>✨ Filtrelenmiş Kayıt</p>
+            <audio controls src="${rec.clean_url}"></audio>
+            <br>
+            <button onclick="deleteAudio('${rec.filename}')" style="color:red;">🗑️ Sil</button>
+            <hr>
+        `;
+        listDiv.appendChild(div);
+    });
 }
 
-// 🔥 SAYFA AÇILINCA ÇALIŞ
 window.onload = loadRecordings;
 </script>
 
